@@ -7,12 +7,33 @@ from torchvision import datasets, transforms
 import numpy as np
 import copy
 import matplotlib.pyplot as plt
+import sys
+from datetime import datetime
+
+class Tee:
+    """
+    Prints everything to both:
+      1. Terminal
+      2. Log file
+    """
+
+    def __init__(self, *files):
+        self.files = files
+
+    def write(self, obj):
+        for f in self.files:
+            f.write(obj)
+            f.flush()
+
+    def flush(self):
+        for f in self.files:
+            f.flush()
 
 # ==========================================
 # Hyperparameters & Configurations
 # ==========================================
 NUM_CLIENTS = 30
-GLOBAL_ROUNDS = 40
+GLOBAL_ROUNDS = 50
 LOCAL_EPOCHS = 3
 BATCH_SIZE = 32
 LEARNING_RATE = 0.01
@@ -246,6 +267,15 @@ def average_weights_mi_iaa(local_weights, mi_scores, importance_dicts):
 # Main Simulation
 # ==========================================
 def main():
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    log_file = open(
+        f"training_log_mine{timestamp}.md",
+        "w",
+        encoding="utf-8"
+)
+
+    sys.stdout = Tee(sys.__stdout__, log_file)
     print("==============================================")
     print(f" MI-IAA: Mutual-Information Importance-Aware Aggregation")
     print(f" (Includes Per-Feature MINE & Proximal Penalty)")
@@ -326,7 +356,7 @@ def main():
     plt.ylabel('Accuracy (%)')
     plt.grid(True)
     plt.legend()
-    plt.savefig('client_accuracy_plot.png')
+    plt.savefig('mine_client_accuracy_plot.png')
     plt.close()
     
     # 2. Communication vs Global Model Accuracy
@@ -337,7 +367,7 @@ def main():
     plt.ylabel('Accuracy (%)')
     plt.grid(True)
     plt.legend()
-    plt.savefig('global_accuracy_plot.png')
+    plt.savefig('mine_global_accuracy_plot.png')
     plt.close()
     
     # 3. Communication vs Both (Combined)
@@ -349,10 +379,13 @@ def main():
     plt.ylabel('Accuracy (%)')
     plt.grid(True)
     plt.legend()
-    plt.savefig('combined_accuracy_plot.png')
+    plt.savefig('mine_combined_accuracy_plot.png')
     plt.close()
     
     print("Plots successfully saved as PNG files in the project folder!")
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    finally:
+        sys.stdout = sys.__stdout__
