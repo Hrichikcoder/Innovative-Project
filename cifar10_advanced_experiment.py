@@ -6,13 +6,36 @@ from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision import datasets, transforms
 import numpy as np
 import copy
+import sys
+from datetime import datetime
 from tqdm import tqdm
+import matplotlib.pyplot as plt
+
+
+class Tee: #Saving results to both terminal and log file
+    """
+    Prints everything to both:
+      1. Terminal
+      2. Log file
+    """
+
+    def __init__(self, *files):
+        self.files = files
+
+    def write(self, obj):
+        for f in self.files:
+            f.write(obj)
+            f.flush()
+
+    def flush(self):
+        for f in self.files:
+            f.flush()
 
 # ==========================================
 # Hyperparameters & Configurations
 # ==========================================
 NUM_CLIENTS = 30
-GLOBAL_ROUNDS = 40  # Reduced to 40 as requested
+GLOBAL_ROUNDS = 50  # Reduced to 40 as requested
 LOCAL_EPOCHS = 3
 BATCH_SIZE = 32
 LEARNING_RATE = 0.01
@@ -194,6 +217,15 @@ def evaluate(model_state, dataloader, device):
 # Main Simulation
 # ==========================================
 def main():
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    log_file = open(
+        f"training_log_fedavg{timestamp}.md",
+        "w",
+        encoding="utf-8"
+    )
+
+    sys.stdout = Tee(sys.__stdout__, log_file)
     print("==============================================")
     print(f" Advanced CIFAR-10 Federated Learning Script")
     print("==============================================")
@@ -270,5 +302,48 @@ def main():
 
     print(f"\nTraining Complete! Final Global Acc: {history['global_acc'][-1]:.2f}%, Final Avg Personalized Acc: {history['personalized_acc'][-1]:.2f}%")
 
+    # --- Plotting Results ---
+    print("\n[Simulation Complete] Generating accuracy plots...")
+    rounds = list(range(1, GLOBAL_ROUNDS + 1))
+    
+    # 1. Communication vs Avg Client Personalized Accuracy
+    plt.figure(figsize=(10, 5))
+    plt.plot(rounds, history['personalized_acc'], marker='o', color='b', label='Avg Client Acc')
+    plt.title('Communication Rounds vs Avg Client Accuracy')
+    plt.xlabel('Communication Rounds')
+    plt.ylabel('Accuracy (%)')
+    plt.grid(True)
+    plt.legend()
+    plt.savefig('fed_avg_client_accuracy_plot.png')
+    plt.close()
+    
+    # 2. Communication vs Global Model Accuracy
+    plt.figure(figsize=(10, 5))
+    plt.plot(rounds, history['global_acc'], marker='s', color='r', label='Global Model Acc')
+    plt.title('Communication Rounds vs Global Accuracy')
+    plt.xlabel('Communication Rounds')
+    plt.ylabel('Accuracy (%)')
+    plt.grid(True)
+    plt.legend()
+    plt.savefig('fed_avg_global_accuracy_plot.png')
+    plt.close()
+    
+    # 3. Communication vs Both (Combined)
+    plt.figure(figsize=(10, 6))
+    plt.plot(rounds, history['personalized_acc'], marker='o', color='b', label='Avg Client Acc')
+    plt.plot(rounds, history['global_acc'], marker='s', color='r', label='Global Model Acc')
+    plt.title('Communication Rounds vs Federated Accuracies')
+    plt.xlabel('Communication Rounds')
+    plt.ylabel('Accuracy (%)')
+    plt.grid(True)
+    plt.legend()
+    plt.savefig('fed_avg_combined_accuracy_plot.png')
+    plt.close()
+    
+    print("Plots successfully saved as PNG files in the project folder!")
+
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    finally:
+        sys.stdout = sys.__stdout__
