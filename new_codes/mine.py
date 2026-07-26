@@ -36,7 +36,7 @@ class Tee:
 # Hyperparameters & Configurations
 # ==========================================
 NUM_CLIENTS = 30
-GLOBAL_ROUNDS = 50
+GLOBAL_ROUNDS = 50 
 LOCAL_EPOCHS = 3
 BATCH_SIZE = 32
 LEARNING_RATE = 0.01
