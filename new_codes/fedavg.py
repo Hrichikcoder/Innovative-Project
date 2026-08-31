@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -36,7 +37,7 @@ class Tee:  # Saving results to both terminal and log file
 # ==========================================
 NUM_CLIENTS = 30
 GLOBAL_ROUNDS = 50
-LOCAL_EPOCHS = 3
+LOCAL_EPOCHS = 5
 BATCH_SIZE = 32
 LEARNING_RATE = 0.01
 MOMENTUM = 0.5
@@ -45,8 +46,15 @@ MIN_SAMPLES_PER_CLIENT = 250
 
 # GPU Detection Strategy
 # Force CPU because standard PyTorch Windows binaries do not yet have sm_120 (RTX 5000) conv kernels
-DEVICE = torch.device("cpu")
-device_name = "CPU (Forced due to sm_120 incompatibility)"
+if torch.cuda.is_available():
+    DEVICE = torch.device("cuda")
+    device_name = f"CUDA GPU ({torch.cuda.get_device_name(0)})"
+elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    DEVICE = torch.device("mps")
+    device_name = "Apple MPS"
+else:
+    DEVICE = torch.device("cpu")
+    device_name = "CPU"
 
 # ==========================================
 # Model Definition
@@ -92,6 +100,9 @@ class ClientUpdate:
 
         optimizer = optim.SGD(model.parameters(), lr=LEARNING_RATE, momentum=MOMENTUM)
 
+        if len(self.dataloader.dataset) == 0:
+            raise ValueError("Client training dataloader contains no samples.")
+
         epoch_loss = []
         for epoch in range(self.epochs):
             batch_loss = []
@@ -105,7 +116,11 @@ class ClientUpdate:
                 optimizer.step()
 
                 batch_loss.append(loss.item())
-            epoch_loss.append(sum(batch_loss) / len(batch_loss))
+            if batch_loss:
+                epoch_loss.append(sum(batch_loss) / len(batch_loss))
+
+        if not epoch_loss:
+            raise RuntimeError("No training batches were processed for this client.")
 
         return model.state_dict(), sum(epoch_loss) / len(epoch_loss), len(self.dataloader.dataset)
 
@@ -113,7 +128,15 @@ class ClientUpdate:
 # Server Aggregation
 # ==========================================
 def average_weights(w, num_samples):
+    if not w:
+        raise ValueError("No client weights were supplied for aggregation.")
+    if len(w) != len(num_samples):
+        raise ValueError("Client weights and sample counts must have the same length.")
+
     total_samples = sum(num_samples)
+    if total_samples <= 0:
+        raise ValueError("Total client samples must be greater than zero.")
+
     w_avg = copy.deepcopy(w[0])
     for key in w_avg.keys():
         w_avg[key] = w_avg[key] * (num_samples[0] / total_samples)
@@ -121,6 +144,58 @@ def average_weights(w, num_samples):
         for i in range(1, len(w)):
             w_avg[key] += w[i][key] * (num_samples[i] / total_samples)
     return w_avg
+
+
+def calculate_client_contributions(local_weights, num_samples):
+    """
+    Calculate each client's exact FedAvg server aggregation contribution.
+
+    FedAvg contribution is its sample-based aggregation weight:
+        n_i / sum_j(n_j)
+
+    The function reports this weight as a percentage and does not alter
+    the FedAvg algorithm.
+    """
+    if not local_weights:
+        raise ValueError("local_weights cannot be empty.")
+    if len(local_weights) != len(num_samples):
+        raise ValueError("local_weights and num_samples must have the same length.")
+
+    total_samples = sum(num_samples)
+    if total_samples <= 0:
+        raise ValueError("Total client samples must be greater than zero.")
+
+    return [(samples / total_samples) * 100.0 for samples in num_samples]
+
+
+def save_client_contributions_md(
+    filepath,
+    dataset_name,
+    round_contributions,
+    round_sample_counts
+):
+    """Save per-client FedAvg contribution for every round in Markdown."""
+    os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write("# FedAvg Per-Client Contribution Report\n\n")
+        f.write(f"- **Dataset:** {dataset_name}\n")
+        f.write("- **Contribution definition:** FedAvg server aggregation weight\n")
+        f.write("- **Formula:** `client samples / total samples in round × 100`\n\n")
+
+        for round_idx, contributions in enumerate(round_contributions, start=1):
+            f.write(f"## Round {round_idx}\n\n")
+            f.write("| Client | Contribution | Samples |\n")
+            f.write("|---:|---:|---:|\n")
+
+            samples = round_sample_counts[round_idx - 1]
+            for client_idx, contribution in enumerate(contributions):
+                f.write(
+                    f"| {client_idx + 1} | {contribution:.4f}% | "
+                    f"{samples[client_idx]} |\n"
+                )
+            f.write("\n")
+
 
 # ==========================================
 # Evaluation
@@ -197,6 +272,8 @@ def main():
     global_model.to(DEVICE)
 
     history = {'global_acc': [], 'personalized_acc': []}
+    contribution_history = []
+    contribution_sample_history = []
 
     print("\n==============================================")
     print(f" Starting FedAvg Training ({GLOBAL_ROUNDS} Rounds)")
@@ -223,6 +300,13 @@ def main():
         global_weights = average_weights(local_weights, local_sample_counts)
         global_model.load_state_dict(global_weights)
 
+        # Per-client FedAvg contribution for this round.
+        round_contributions = calculate_client_contributions(
+            local_weights, local_sample_counts
+        )
+        contribution_history.append(round_contributions)
+        contribution_sample_history.append(list(local_sample_counts))
+
         # Calculate Analytics
         total_samples_round = sum(local_sample_counts)
         avg_train_loss = sum(local_losses) / len(local_losses)
@@ -239,7 +323,7 @@ def main():
         print(f"   | Client | Contribution % | Retention | Local Loss | Local Acc % |")
         print(f"   |--------|----------------|-----------|------------|-------------|")
         for idx in range(NUM_CLIENTS):
-            contribution = (local_sample_counts[idx] / total_samples_round) * 100
+            contribution = round_contributions[idx]
             retention_rate = 100.0  # Assumed 100% since no dropout mechanism is implemented
             print(f"   | {idx+1:6d} | {contribution:13.2f}% | {retention_rate:8.1f}% | {local_losses[idx]:10.4f} | {client_personalized_accuracies[idx]:10.2f}% |")
 
@@ -247,6 +331,15 @@ def main():
         history['personalized_acc'].append(avg_personalized_acc)
 
     print(f"\nTraining Complete! Final Global Acc: {history['global_acc'][-1]:.2f}%, Final Avg Personalized Acc: {history['personalized_acc'][-1]:.2f}%")
+
+    contribution_file = f'fedavg_{dataset_name}_client_contributions.md'
+    save_client_contributions_md(
+        contribution_file,
+        dataset_name,
+        contribution_history,
+        contribution_sample_history
+    )
+    print(f"Per-client contribution report saved to {contribution_file}")
 
     # --- Plotting Results ---
     print("\n[Simulation Complete] Generating accuracy plots...")
