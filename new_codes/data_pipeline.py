@@ -5,6 +5,7 @@ saves/loads client index partitions so all training scripts share the same split
 """
 import os
 import argparse
+import random
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
@@ -14,8 +15,12 @@ SEED = 42
 
 
 def set_seed(seed=SEED):
-    torch.manual_seed(seed)
+    """Set all relevant random seeds for reproducible experiments."""
+    random.seed(seed)
     np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 # ==========================================
@@ -84,6 +89,24 @@ def get_num_classes(name):
 # 2. Dirichlet Partitioning (dataset-agnostic)
 # ==========================================
 def partition_dirichlet(targets, num_clients, alpha, min_samples):
+    """Partition targets with the existing Dirichlet/rejection-sampling method."""
+    targets = np.asarray(targets).reshape(-1)
+
+    if targets.size == 0:
+        raise ValueError("targets must contain at least one sample.")
+    if num_clients < 1:
+        raise ValueError("num_clients must be at least 1.")
+    if alpha <= 0:
+        raise ValueError("alpha must be greater than 0.")
+    if min_samples < 1:
+        raise ValueError("min_samples must be at least 1.")
+    if num_clients * min_samples > len(targets):
+        raise ValueError(
+            f"Impossible partition constraint: {num_clients} clients × "
+            f"{min_samples} minimum samples = {num_clients * min_samples}, "
+            f"but only {len(targets)} samples are available."
+        )
+
     num_classes = len(np.unique(targets))
     class_indices = [np.where(targets == i)[0] for i in range(num_classes)]
 
@@ -140,19 +163,62 @@ def partition_dirichlet(targets, num_clients, alpha, min_samples):
 # ==========================================
 # 3. Save / Load partitions
 # ==========================================
-def partition_path(dataset_name, out_dir='./partitions'):
+def partition_path(
+    dataset_name,
+    out_dir='./partitions',
+    num_clients=None,
+    alpha=None,
+    min_samples=None
+):
+    """
+    Return the partition-file path.
+
+    When the partition configuration is supplied, it is encoded in the
+    filename so experiments with different numbers of clients, Dirichlet
+    alpha values, or minimum client sizes cannot accidentally reuse the
+    wrong partition.
+
+    For backward compatibility, callers that omit the configuration still
+    receive the original dataset-only filename.
+    """
     os.makedirs(out_dir, exist_ok=True)
-    return os.path.join(out_dir, f"partitions_{dataset_name.lower()}.pt")
+    dataset_name = dataset_name.lower()
+
+    if num_clients is None or alpha is None or min_samples is None:
+        return os.path.join(out_dir, f"partitions_{dataset_name}.pt")
+
+    alpha_str = f"{alpha:g}"
+    return os.path.join(
+        out_dir,
+        f"partitions_{dataset_name}_clients{num_clients}_alpha{alpha_str}_min{min_samples}.pt"
+    )
 
 
-def save_partitions(partitions, dataset_name, out_dir='./partitions'):
-    path = partition_path(dataset_name, out_dir)
+def save_partitions(
+    partitions,
+    dataset_name,
+    out_dir='./partitions',
+    num_clients=None,
+    alpha=None,
+    min_samples=None
+):
+    path = partition_path(
+        dataset_name, out_dir, num_clients, alpha, min_samples
+    )
     torch.save(partitions, path)
     print(f"Saved partitions to {path}")
 
 
-def load_partitions(dataset_name, out_dir='./partitions'):
-    path = partition_path(dataset_name, out_dir)
+def load_partitions(
+    dataset_name,
+    out_dir='./partitions',
+    num_clients=None,
+    alpha=None,
+    min_samples=None
+):
+    path = partition_path(
+        dataset_name, out_dir, num_clients, alpha, min_samples
+    )
     if not os.path.exists(path):
         raise FileNotFoundError(
             f"No partition file found at {path}. Run: python data_pipeline.py --dataset {dataset_name}"
@@ -163,23 +229,49 @@ def load_partitions(dataset_name, out_dir='./partitions'):
     return torch.load(path, weights_only=False)
 
 
-def ensure_partitions(dataset_name, num_clients=30, alpha=0.1, min_samples=250, out_dir='./partitions'):
-    """Load partitions if they exist, else generate them on the fly (used by algo scripts)."""
-    path = partition_path(dataset_name, out_dir)
+def ensure_partitions(
+    dataset_name,
+    num_clients=30,
+    alpha=0.1,
+    min_samples=250,
+    out_dir='./partitions'
+):
+    """Load matching partitions if they exist, otherwise generate them."""
+    path = partition_path(
+        dataset_name, out_dir, num_clients, alpha, min_samples
+    )
     if os.path.exists(path):
-        return load_partitions(dataset_name, out_dir)
+        return load_partitions(
+            dataset_name,
+            out_dir,
+            num_clients,
+            alpha,
+            min_samples
+        )
 
     print(f"No partitions found for '{dataset_name}', generating now...")
     set_seed()
     train_dataset, _ = get_dataset(dataset_name)
     targets = get_targets(train_dataset, dataset_name)
     partitions = partition_dirichlet(targets, num_clients, alpha, min_samples)
-    save_partitions(partitions, dataset_name, out_dir)
+    save_partitions(
+        partitions,
+        dataset_name,
+        out_dir,
+        num_clients,
+        alpha,
+        min_samples
+    )
     return partitions
 
 
 def build_client_loaders(dataset, partitions, batch_size):
     """Turn saved index partitions into DataLoaders for a given dataset object."""
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1.")
+    if not partitions:
+        raise ValueError("partitions must not be empty.")
+
     train_loaders, test_loaders = [], []
     for i in sorted(partitions.keys()):
         train_idx = partitions[i]["train_idx"]
@@ -211,7 +303,14 @@ def main():
     targets = get_targets(train_dataset, args.dataset)
 
     partitions = partition_dirichlet(targets, args.num_clients, args.alpha, args.min_samples)
-    save_partitions(partitions, args.dataset, args.out_dir)
+    save_partitions(
+        partitions,
+        args.dataset,
+        args.out_dir,
+        args.num_clients,
+        args.alpha,
+        args.min_samples
+    )
 
 
 if __name__ == '__main__':
