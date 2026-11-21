@@ -1,1 +1,8 @@
 venv/
+.venv/
+.vscode/
+data/
+*.pyc
+__pycache__/
+
+Cloned_Codebase/
