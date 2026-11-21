@@ -1,18 +1,19 @@
+import os
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset, Subset
-from torchvision import datasets, transforms
-import numpy as np
+from torch.utils.data import DataLoader
 import copy
 import sys
+import argparse
 from datetime import datetime
-from tqdm import tqdm
 import matplotlib.pyplot as plt
 
+# Import the centralized data pipeline
+import data_pipeline
 
-class Tee: #Saving results to both terminal and log file
+
+class Tee:  # Saving results to both terminal and log file
     """
     Prints everything to both:
       1. Terminal
@@ -35,104 +36,44 @@ class Tee: #Saving results to both terminal and log file
 # Hyperparameters & Configurations
 # ==========================================
 NUM_CLIENTS = 30
-GLOBAL_ROUNDS = 50  # Reduced to 40 as requested
-LOCAL_EPOCHS = 3
+GLOBAL_ROUNDS = 50
+LOCAL_EPOCHS = 5
 BATCH_SIZE = 32
 LEARNING_RATE = 0.01
 MOMENTUM = 0.5
 DIRICHLET_ALPHA = 0.1  # Highly skewed data
 MIN_SAMPLES_PER_CLIENT = 250
-FEDCURV_LAMBDA = 1.0
 
 # GPU Detection Strategy
 # Force CPU because standard PyTorch Windows binaries do not yet have sm_120 (RTX 5000) conv kernels
-DEVICE = torch.device("cpu")
-device_name = "CPU (Forced due to sm_120 incompatibility)"
-
-# ==========================================
-# Data Partitioning (Dirichlet Non-IID)
-# ==========================================
-def get_dirichlet_data_loaders(dataset, num_clients, alpha, batch_size, min_samples):
-    num_classes = len(dataset.classes)
-    targets = np.array(dataset.targets)
-    
-    class_indices = [np.where(targets == i)[0] for i in range(num_classes)]
-    
-    print(f"\n[Data Partitioning] Splitting data for {num_clients} clients (Alpha={alpha}).")
-    print(f"Enforcing minimum of {min_samples} samples per client using rejection sampling...")
-    
-    attempts = 0
-    while True:
-        attempts += 1
-        client_indices = {i: [] for i in range(num_clients)}
-        
-        for c in range(num_classes):
-            proportions = np.random.dirichlet(np.repeat(alpha, num_clients))
-            num_samples_per_client = (proportions * len(class_indices[c])).astype(int)
-            
-            diff = len(class_indices[c]) - num_samples_per_client.sum()
-            for _ in range(diff):
-                num_samples_per_client[np.random.randint(num_clients)] += 1
-                
-            np.random.shuffle(class_indices[c])
-            current_idx = 0
-            for i in range(num_clients):
-                num_samples = num_samples_per_client[i]
-                client_indices[i].extend(class_indices[c][current_idx : current_idx + num_samples])
-                current_idx += num_samples
-                
-        # Check constraints
-        min_client_samples = min([len(client_indices[i]) for i in range(num_clients)])
-        if min_client_samples >= min_samples:
-            print(f"Success! Minimum samples found: {min_client_samples}. (Took {attempts} attempt(s))")
-            break
-        else:
-            if attempts % 10 == 0:
-                print(f"Attempt {attempts}... Constraint failed (Minimum found: {min_client_samples}). Retrying...")
-
-    client_train_loaders = []
-    client_test_loaders = []
-    
-    print("\n[Data Analytics] Splitting into 80% Train, 20% Local Test...")
-    for i in range(num_clients):
-        np.random.shuffle(client_indices[i])
-        total_len = len(client_indices[i])
-        train_len = int(0.8 * total_len)
-        test_len = total_len - train_len
-        
-        train_idx = client_indices[i][:train_len]
-        test_idx = client_indices[i][train_len:]
-        
-        client_train_loaders.append(DataLoader(Subset(dataset, train_idx), batch_size=batch_size, shuffle=True))
-        client_test_loaders.append(DataLoader(Subset(dataset, test_idx), batch_size=batch_size, shuffle=False))
-        
-        labels = targets[client_indices[i]]
-        unique, counts = np.unique(labels, return_counts=True)
-        # We limit the class distribution printout to keep the console slightly cleaner, 
-        # but the extreme skew will be visible here.
-        class_dist_str = ", ".join([f"{u}:{c}" for u, c in zip(unique, counts)])
-        print(f"Client {i+1:2d} | Total Data: {total_len:4d} | Classes -> {class_dist_str}")
-
-    return client_train_loaders, client_test_loaders
+if torch.cuda.is_available():
+    DEVICE = torch.device("cuda")
+    device_name = f"CUDA GPU ({torch.cuda.get_device_name(0)})"
+elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    DEVICE = torch.device("mps")
+    device_name = "Apple MPS"
+else:
+    DEVICE = torch.device("cpu")
+    device_name = "CPU"
 
 # ==========================================
 # Model Definition
 # ==========================================
 class SimpleCNN(nn.Module):
-    def __init__(self):
+    def __init__(self, num_classes=10):
         super(SimpleCNN, self).__init__()
         self.conv1 = nn.Conv2d(3, 32, kernel_size=3, padding=1)
         self.relu1 = nn.ReLU()
         self.pool1 = nn.MaxPool2d(2)
-        
+
         self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
         self.relu2 = nn.ReLU()
         self.pool2 = nn.MaxPool2d(2)
-        
+
         self.flatten = nn.Flatten()
         self.fc1 = nn.Linear(64 * 8 * 8, 128)
         self.relu3 = nn.ReLU()
-        self.fc2 = nn.Linear(128, 10)
+        self.fc2 = nn.Linear(128, num_classes)
 
     def forward(self, x):
         x = self.pool1(self.relu1(self.conv1(x)))
@@ -156,31 +97,46 @@ class ClientUpdate:
         model = copy.deepcopy(global_model)
         model.to(self.device)
         model.train()
-        
+
         optimizer = optim.SGD(model.parameters(), lr=LEARNING_RATE, momentum=MOMENTUM)
-        
+
+        if len(self.dataloader.dataset) == 0:
+            raise ValueError("Client training dataloader contains no samples.")
+
         epoch_loss = []
         for epoch in range(self.epochs):
             batch_loss = []
             for images, labels in self.dataloader:
                 images, labels = images.to(self.device), labels.view(-1).long().to(self.device)
-                
+
                 optimizer.zero_grad()
                 outputs = model(images)
                 loss = self.criterion(outputs, labels)
                 loss.backward()
                 optimizer.step()
-                
+
                 batch_loss.append(loss.item())
-            epoch_loss.append(sum(batch_loss) / len(batch_loss))
-            
+            if batch_loss:
+                epoch_loss.append(sum(batch_loss) / len(batch_loss))
+
+        if not epoch_loss:
+            raise RuntimeError("No training batches were processed for this client.")
+
         return model.state_dict(), sum(epoch_loss) / len(epoch_loss), len(self.dataloader.dataset)
 
 # ==========================================
 # Server Aggregation
 # ==========================================
 def average_weights(w, num_samples):
+    if not w:
+        raise ValueError("No client weights were supplied for aggregation.")
+    if len(w) != len(num_samples):
+        raise ValueError("Client weights and sample counts must have the same length.")
+
     total_samples = sum(num_samples)
+    if total_samples <= 0:
+        raise ValueError("Total client samples must be greater than zero.")
+
     w_avg = copy.deepcopy(w[0])
     for key in w_avg.keys():
         w_avg[key] = w_avg[key] * (num_samples[0] / total_samples)
@@ -189,17 +145,69 @@ def average_weights(w, num_samples):
             w_avg[key] += w[i][key] * (num_samples[i] / total_samples)
     return w_avg
 
+
+def calculate_client_contributions(local_weights, num_samples):
+    """
+    Calculate each client's exact FedAvg server aggregation contribution.
+
+    FedAvg contribution is its sample-based aggregation weight:
+        n_i / sum_j(n_j)
+
+    The function reports this weight as a percentage and does not alter
+    the FedAvg algorithm.
+    """
+    if not local_weights:
+        raise ValueError("local_weights cannot be empty.")
+    if len(local_weights) != len(num_samples):
+        raise ValueError("local_weights and num_samples must have the same length.")
+
+    total_samples = sum(num_samples)
+    if total_samples <= 0:
+        raise ValueError("Total client samples must be greater than zero.")
+
+    return [(samples / total_samples) * 100.0 for samples in num_samples]
+
+
+def save_client_contributions_md(
+    filepath,
+    dataset_name,
+    round_contributions,
+    round_sample_counts
+):
+    """Save per-client FedAvg contribution for every round in Markdown."""
+    os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write("# FedAvg Per-Client Contribution Report\n\n")
+        f.write(f"- **Dataset:** {dataset_name}\n")
+        f.write("- **Contribution definition:** FedAvg server aggregation weight\n")
+        f.write("- **Formula:** `client samples / total samples in round × 100`\n\n")
+
+        for round_idx, contributions in enumerate(round_contributions, start=1):
+            f.write(f"## Round {round_idx}\n\n")
+            f.write("| Client | Contribution | Samples |\n")
+            f.write("|---:|---:|---:|\n")
+
+            samples = round_sample_counts[round_idx - 1]
+            for client_idx, contribution in enumerate(contributions):
+                f.write(
+                    f"| {client_idx + 1} | {contribution:.4f}% | "
+                    f"{samples[client_idx]} |\n"
+                )
+            f.write("\n")
+
+
 # ==========================================
 # Evaluation
 # ==========================================
-def evaluate(model_state, dataloader, device):
-    model = SimpleCNN()
+def evaluate(model_state, dataloader, device, num_classes):
+    model = SimpleCNN(num_classes=num_classes)
     model.load_state_dict(model_state)
     model.eval()
     model.to(device)
     correct = 0
     total = 0
-    
+
     with torch.no_grad():
         for images, labels in dataloader:
             images, labels = images.to(device), labels.view(-1).long().to(device)
@@ -207,7 +215,7 @@ def evaluate(model_state, dataloader, device):
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
-            
+
     if total == 0:
         return 0.0
     accuracy = 100 * correct / total
@@ -217,129 +225,157 @@ def evaluate(model_state, dataloader, device):
 # Main Simulation
 # ==========================================
 def main():
+    parser = argparse.ArgumentParser(description="FedAvg Federated Learning")
+    parser.add_argument('--dataset', required=True,
+                         choices=['cifar10', 'mnist', 'pathmnist', 'bloodmnist'],
+                         help="Dataset to train on.")
+    args = parser.parse_args()
+    dataset_name = args.dataset.lower()
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     log_file = open(
-        f"training_log_fedavg{timestamp}.md",
+        f"training_log_fedavg_{dataset_name}_{timestamp}.md",
         "w",
         encoding="utf-8"
     )
 
     sys.stdout = Tee(sys.__stdout__, log_file)
     print("==============================================")
-    print(f" Advanced CIFAR-10 Federated Learning Script")
+    print(f" Advanced Federated Learning Script (FedAvg)")
     print("==============================================")
+    print(f"Dataset         : {dataset_name}")
     print(f"Hardware Device : {device_name}")
     print(f"Total Clients   : {NUM_CLIENTS}")
     print(f"Global Rounds   : {GLOBAL_ROUNDS}")
     print(f"Heterogeneity   : Dirichlet (Alpha={DIRICHLET_ALPHA})")
-    
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616))
-    ])
-    
-    train_dataset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
-    global_test_dataset = datasets.CIFAR10(root='./data', train=False, download=True, transform=transform)
+
+    data_pipeline.set_seed()
+    num_classes = data_pipeline.get_num_classes(dataset_name)
+
+    # Using centralized data pipeline
+    train_dataset, global_test_dataset = data_pipeline.get_dataset(dataset_name)
     global_test_loader = DataLoader(global_test_dataset, batch_size=128, shuffle=False)
-    
-    client_train_loaders, client_test_loaders = get_dirichlet_data_loaders(
-        train_dataset, NUM_CLIENTS, DIRICHLET_ALPHA, BATCH_SIZE, MIN_SAMPLES_PER_CLIENT
+
+    partitions = data_pipeline.ensure_partitions(
+        dataset_name=dataset_name,
+        num_clients=NUM_CLIENTS,
+        alpha=DIRICHLET_ALPHA,
+        min_samples=MIN_SAMPLES_PER_CLIENT
     )
-    
-    global_model = SimpleCNN()
+
+    client_train_loaders, client_test_loaders = data_pipeline.build_client_loaders(
+        train_dataset, partitions, BATCH_SIZE
+    )
+
+    global_model = SimpleCNN(num_classes=num_classes)
     global_model.to(DEVICE)
-    
+
     history = {'global_acc': [], 'personalized_acc': []}
-    
+    contribution_history = []
+    contribution_sample_history = []
+
     print("\n==============================================")
     print(f" Starting FedAvg Training ({GLOBAL_ROUNDS} Rounds)")
     print("==============================================")
-    
+
     for round_idx in range(1, GLOBAL_ROUNDS + 1):
         local_weights, local_losses, local_sample_counts = [], [], []
         client_personalized_accuracies = []
-        
+
         print(f"\n| Round : {round_idx}/{GLOBAL_ROUNDS} |")
-        
+
         for idx in range(NUM_CLIENTS):
             client = ClientUpdate(dataloader=client_train_loaders[idx], device=DEVICE, epochs=LOCAL_EPOCHS)
             personalized_weights, loss, num_samples = client.train(global_model)
-            
-            pers_acc = evaluate(personalized_weights, client_test_loaders[idx], DEVICE)
+
+            pers_acc = evaluate(personalized_weights, client_test_loaders[idx], DEVICE, num_classes)
             client_personalized_accuracies.append(pers_acc)
-            
+
             local_weights.append(copy.deepcopy(personalized_weights))
             local_losses.append(loss)
             local_sample_counts.append(num_samples)
-            
+
         # Aggregate weights on Server
         global_weights = average_weights(local_weights, local_sample_counts)
         global_model.load_state_dict(global_weights)
-        
+
+        # Per-client FedAvg contribution for this round.
+        round_contributions = calculate_client_contributions(
+            local_weights, local_sample_counts
+        )
+        contribution_history.append(round_contributions)
+        contribution_sample_history.append(list(local_sample_counts))
+
         # Calculate Analytics
         total_samples_round = sum(local_sample_counts)
         avg_train_loss = sum(local_losses) / len(local_losses)
         avg_personalized_acc = sum(client_personalized_accuracies) / len(client_personalized_accuracies)
-        global_test_acc = evaluate(global_model.state_dict(), global_test_loader, DEVICE)
-        
+        global_test_acc = evaluate(global_model.state_dict(), global_test_loader, DEVICE, num_classes)
+
         # Print Deep Analytics
         print(f"\n   [Server Metrics]")
         print(f"   Global Model Test Accuracy    : {global_test_acc:.2f}%")
         print(f"   Avg Client Personalized Acc   : {avg_personalized_acc:.2f}%")
         print(f"   Avg Local Train Loss          : {avg_train_loss:.4f}")
-        
+
         print(f"\n   [Detailed Per-Client Metrics]")
         print(f"   | Client | Contribution % | Retention | Local Loss | Local Acc % |")
         print(f"   |--------|----------------|-----------|------------|-------------|")
         for idx in range(NUM_CLIENTS):
-            contribution = (local_sample_counts[idx] / total_samples_round) * 100
+            contribution = round_contributions[idx]
             retention_rate = 100.0  # Assumed 100% since no dropout mechanism is implemented
             print(f"   | {idx+1:6d} | {contribution:13.2f}% | {retention_rate:8.1f}% | {local_losses[idx]:10.4f} | {client_personalized_accuracies[idx]:10.2f}% |")
-        
+
         history['global_acc'].append(global_test_acc)
         history['personalized_acc'].append(avg_personalized_acc)
 
     print(f"\nTraining Complete! Final Global Acc: {history['global_acc'][-1]:.2f}%, Final Avg Personalized Acc: {history['personalized_acc'][-1]:.2f}%")
 
+    contribution_file = f'fedavg_{dataset_name}_client_contributions.md'
+    save_client_contributions_md(
+        contribution_file,
+        dataset_name,
+        contribution_history,
+        contribution_sample_history
+    )
+    print(f"Per-client contribution report saved to {contribution_file}")
+
     # --- Plotting Results ---
     print("\n[Simulation Complete] Generating accuracy plots...")
     rounds = list(range(1, GLOBAL_ROUNDS + 1))
-    
-    # 1. Communication vs Avg Client Personalized Accuracy
+
     plt.figure(figsize=(10, 5))
     plt.plot(rounds, history['personalized_acc'], marker='o', color='b', label='Avg Client Acc')
-    plt.title('Communication Rounds vs Avg Client Accuracy')
+    plt.title(f'FedAvg ({dataset_name}): Communication Rounds vs Avg Client Accuracy')
     plt.xlabel('Communication Rounds')
     plt.ylabel('Accuracy (%)')
     plt.grid(True)
     plt.legend()
-    plt.savefig('fed_avg_client_accuracy_plot.png')
+    plt.savefig(f'fedavg_{dataset_name}_client_accuracy_plot.png')
     plt.close()
-    
-    # 2. Communication vs Global Model Accuracy
+
     plt.figure(figsize=(10, 5))
     plt.plot(rounds, history['global_acc'], marker='s', color='r', label='Global Model Acc')
-    plt.title('Communication Rounds vs Global Accuracy')
+    plt.title(f'FedAvg ({dataset_name}): Communication Rounds vs Global Accuracy')
     plt.xlabel('Communication Rounds')
     plt.ylabel('Accuracy (%)')
     plt.grid(True)
     plt.legend()
-    plt.savefig('fed_avg_global_accuracy_plot.png')
+    plt.savefig(f'fedavg_{dataset_name}_global_accuracy_plot.png')
     plt.close()
-    
-    # 3. Communication vs Both (Combined)
+
     plt.figure(figsize=(10, 6))
     plt.plot(rounds, history['personalized_acc'], marker='o', color='b', label='Avg Client Acc')
     plt.plot(rounds, history['global_acc'], marker='s', color='r', label='Global Model Acc')
-    plt.title('Communication Rounds vs Federated Accuracies')
+    plt.title(f'FedAvg ({dataset_name}): Communication Rounds vs Federated Accuracies')
     plt.xlabel('Communication Rounds')
     plt.ylabel('Accuracy (%)')
     plt.grid(True)
     plt.legend()
-    plt.savefig('fed_avg_combined_accuracy_plot.png')
+    plt.savefig(f'fedavg_{dataset_name}_combined_accuracy_plot.png')
     plt.close()
-    
+
     print("Plots successfully saved as PNG files in the project folder!")
 
 if __name__ == '__main__':
