@@ -1,0 +1,55 @@
+Advanced FedCurv Log
+======================================
+Dataset: mnist
+Data Distribution: Dirichlet Alpha=0.1, 30 Clients
+======================================
+FedCurv - Round 1: Global Acc=80.25%, Personalized Acc=95.10%
+FedCurv - Round 2: Global Acc=92.30%, Personalized Acc=96.73%
+FedCurv - Round 3: Global Acc=94.35%, Personalized Acc=97.67%
+FedCurv - Round 4: Global Acc=95.29%, Personalized Acc=98.29%
+FedCurv - Round 5: Global Acc=96.33%, Personalized Acc=98.32%
+FedCurv - Round 6: Global Acc=96.88%, Personalized Acc=98.91%
+FedCurv - Round 7: Global Acc=97.09%, Personalized Acc=98.89%
+FedCurv - Round 8: Global Acc=97.23%, Personalized Acc=99.06%
+FedCurv - Round 9: Global Acc=97.42%, Personalized Acc=98.98%
+FedCurv - Round 10: Global Acc=97.54%, Personalized Acc=98.97%
+FedCurv - Round 11: Global Acc=97.62%, Personalized Acc=99.05%
+FedCurv - Round 12: Global Acc=97.71%, Personalized Acc=99.16%
+FedCurv - Round 13: Global Acc=97.72%, Personalized Acc=99.12%
+FedCurv - Round 14: Global Acc=97.93%, Personalized Acc=99.20%
+FedCurv - Round 15: Global Acc=97.96%, Personalized Acc=99.22%
+FedCurv - Round 16: Global Acc=98.03%, Personalized Acc=99.21%
+FedCurv - Round 17: Global Acc=98.08%, Personalized Acc=99.23%
+FedCurv - Round 18: Global Acc=98.15%, Personalized Acc=99.33%
+FedCurv - Round 19: Global Acc=98.17%, Personalized Acc=99.29%
+FedCurv - Round 20: Global Acc=98.24%, Personalized Acc=99.34%
+FedCurv - Round 21: Global Acc=98.33%, Personalized Acc=99.28%
+FedCurv - Round 22: Global Acc=98.30%, Personalized Acc=99.40%
+FedCurv - Round 23: Global Acc=98.39%, Personalized Acc=99.36%
+FedCurv - Round 24: Global Acc=98.40%, Personalized Acc=99.37%
+FedCurv - Round 25: Global Acc=98.41%, Personalized Acc=99.16%
+FedCurv - Round 26: Global Acc=98.50%, Personalized Acc=99.35%
+FedCurv - Round 27: Global Acc=98.49%, Personalized Acc=99.30%
+FedCurv - Round 28: Global Acc=98.45%, Personalized Acc=99.35%
+FedCurv - Round 29: Global Acc=98.47%, Personalized Acc=99.36%
+FedCurv - Round 30: Global Acc=98.49%, Personalized Acc=99.33%
+FedCurv - Round 31: Global Acc=98.54%, Personalized Acc=99.33%
+FedCurv - Round 32: Global Acc=98.57%, Personalized Acc=99.32%
+FedCurv - Round 33: Global Acc=98.55%, Personalized Acc=99.33%
+FedCurv - Round 34: Global Acc=98.49%, Personalized Acc=99.36%
+FedCurv - Round 35: Global Acc=98.54%, Personalized Acc=99.28%
+FedCurv - Round 36: Global Acc=98.55%, Personalized Acc=99.39%
+FedCurv - Round 37: Global Acc=98.55%, Personalized Acc=99.37%
+FedCurv - Round 38: Global Acc=98.56%, Personalized Acc=99.42%
+FedCurv - Round 39: Global Acc=98.53%, Personalized Acc=99.37%
+FedCurv - Round 40: Global Acc=98.58%, Personalized Acc=99.37%
+FedCurv - Round 41: Global Acc=98.54%, Personalized Acc=99.38%
+FedCurv - Round 42: Global Acc=98.58%, Personalized Acc=99.41%
+FedCurv - Round 43: Global Acc=98.58%, Personalized Acc=99.38%
+FedCurv - Round 44: Global Acc=98.66%, Personalized Acc=99.41%
+FedCurv - Round 45: Global Acc=98.62%, Personalized Acc=99.32%
+FedCurv - Round 46: Global Acc=98.66%, Personalized Acc=99.37%
+FedCurv - Round 47: Global Acc=98.63%, Personalized Acc=99.41%
+FedCurv - Round 48: Global Acc=98.65%, Personalized Acc=99.43%
+FedCurv - Round 49: Global Acc=98.72%, Personalized Acc=99.43%
+FedCurv - Round 50: Global Acc=98.67%, Personalized Acc=99.38%
